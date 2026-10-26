@@ -36,7 +36,7 @@ jobs:
   ghostclick:
     runs-on: ubuntu-latest
     steps:
-      - uses: ghostclickhq/theme-check-action@v1
+      - uses: ghostclickhq/theme-check-action@v2
         with:
           ghostclick_token: ${{ secrets.GHOSTCLICK_TOKEN }}
           preview_url: ${{ inputs.preview_url || vars.GHOSTCLICK_PREVIEW_URL }}
@@ -48,7 +48,7 @@ On a pull request it checks the theme in the repository variable `GHOSTCLICK_PRE
 Already deploying the theme in an earlier step? Pass its id from that step:
 
 ```yaml
-      - uses: ghostclickhq/theme-check-action@v1
+      - uses: ghostclickhq/theme-check-action@v2
         with:
           ghostclick_token: ${{ secrets.GHOSTCLICK_TOKEN }}
           theme_id: ${{ steps.deploy.outputs.theme_id }}
@@ -59,7 +59,7 @@ Already deploying the theme in an earlier step? Pass its id from that step:
 The check is one Node 18+ script with no dependencies. Set two environment variables and run it. It exits 0 when every check passed and 1 when something broke, with one line per failure and its report link.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ghostclickhq/theme-check-action/v1/ghostclick-check.mjs -o ghostclick-check.mjs
+curl -fsSL https://raw.githubusercontent.com/ghostclickhq/theme-check-action/v2/ghostclick-check.mjs -o ghostclick-check.mjs
 GHOSTCLICK_TOKEN="$GHOSTCLICK_TOKEN" \
 GHOSTCLICK_PREVIEW_URL="https://my-store.myshopify.com/?preview_theme_id=123456789" \
 node ghostclick-check.mjs
