@@ -1,0 +1,109 @@
+name: GhostClick theme check
+description: Run your GhostClick journeys and page checks against a Shopify theme before it goes live, and fail the build when a journey breaks.
+author: GhostClick
+branding:
+  icon: shopping-cart
+  color: orange
+
+inputs:
+  ghostclick_token:
+    description: Your GhostClick GitHub key (starts with gc_ci_). Make one in GhostClick, Settings, GitHub Action, and keep it in a repository secret. The key decides the store and which journeys and pages run.
+    required: true
+  store:
+    description: Your store's .myshopify.com address, like my-store.myshopify.com.
+    required: true
+  theme_id:
+    description: Test a theme you already pushed in an earlier step. Leave empty and the Action pushes theme_root to a development theme and deletes it afterwards.
+    required: false
+    default: ""
+  theme_access_password:
+    description: A Theme Access app password (shptka_...), used to push the theme with Shopify CLI. Needed when theme_id is empty.
+    required: false
+    default: ""
+  theme_root:
+    description: The folder that holds the theme files.
+    required: false
+    default: "."
+  min_page_score:
+    description: Fail when a page monitor scores under this (0 to 100). 0 fails only on critical issues.
+    required: false
+    default: "0"
+  fail_on_failure:
+    description: Fail the workflow when a check fails. Set to false to report only.
+    required: false
+    default: "true"
+  timeout_minutes:
+    description: How long to wait for the checks before giving up.
+    required: false
+    default: "30"
+  github_token:
+    description: Pass secrets.GITHUB_TOKEN to post the results as a pull request comment (needs pull-requests write permission). Leave empty for the job summary only.
+    required: false
+    default: ""
+  api_url:
+    description: GhostClick's address. Change it only to test a preview deployment.
+    required: false
+    default: "https://www.getghostclick.com"
+
+outputs:
+  result:
+    description: passed or failed
+    value: ${{ steps.check.outputs.result }}
+  theme_id:
+    description: The theme that was tested.
+    value: ${{ steps.check.outputs.theme_id }}
+  report_urls:
+    description: One report link per check, separated by new lines.
+    value: ${{ steps.check.outputs.report_urls }}
+
+runs:
+  using: composite
+  steps:
+    - name: Push the theme to a development theme
+      id: push
+      if: inputs.theme_id == ''
+      shell: bash
+      env:
+        SHOPIFY_CLI_THEME_TOKEN: ${{ inputs.theme_access_password }}
+        SHOPIFY_FLAG_STORE: ${{ inputs.store }}
+        SHOPIFY_CLI_TTY: "0"
+        THEME_ROOT: ${{ inputs.theme_root }}
+      run: |
+        if [ -z "$SHOPIFY_CLI_THEME_TOKEN" ]; then
+          echo "::error title=GhostClick::Set theme_access_password (a Theme Access app password) so the Action can push the theme, or pass theme_id."
+          exit 1
+        fi
+        npm install --global --no-fund --no-audit --loglevel=error @shopify/cli@3
+        shopify theme push --development --json --path "$THEME_ROOT" > "$RUNNER_TEMP/ghostclick-push.json"
+        theme_id="$(jq -r '.theme.id' "$RUNNER_TEMP/ghostclick-push.json")"
+        if [ -z "$theme_id" ] || [ "$theme_id" = "null" ]; then
+          echo "::error title=GhostClick::Shopify CLI did not return a theme id."
+          cat "$RUNNER_TEMP/ghostclick-push.json"
+          exit 1
+        fi
+        echo "Pushed to development theme $theme_id"
+        echo "theme_id=$theme_id" >> "$GITHUB_OUTPUT"
+
+    - name: Run GhostClick on the theme
+      id: check
+      shell: bash
+      env:
+        GHOSTCLICK_TOKEN: ${{ inputs.ghostclick_token }}
+        GHOSTCLICK_STORE: ${{ inputs.store }}
+        GHOSTCLICK_THEME_ID: ${{ inputs.theme_id || steps.push.outputs.theme_id }}
+        GHOSTCLICK_MIN_PAGE_SCORE: ${{ inputs.min_page_score }}
+        GHOSTCLICK_FAIL_ON_FAILURE: ${{ inputs.fail_on_failure }}
+        GHOSTCLICK_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+        GHOSTCLICK_API_URL: ${{ inputs.api_url }}
+        GHOSTCLICK_GITHUB_TOKEN: ${{ inputs.github_token }}
+      run: node "$GITHUB_ACTION_PATH/ghostclick-check.mjs"
+
+    - name: Delete the development theme
+      if: always() && steps.push.outputs.theme_id != ''
+      shell: bash
+      env:
+        SHOPIFY_CLI_THEME_TOKEN: ${{ inputs.theme_access_password }}
+        SHOPIFY_FLAG_STORE: ${{ inputs.store }}
+        SHOPIFY_CLI_TTY: "0"
+        THEME_ID: ${{ steps.push.outputs.theme_id }}
+      run: shopify theme delete --theme "$THEME_ID" --force || echo "::warning title=GhostClick::Could not delete development theme $THEME_ID. Shopify removes unused development themes after 7 days."
