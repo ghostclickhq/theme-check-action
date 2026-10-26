@@ -1,6 +1,7 @@
 // GhostClick theme check: the step that talks to GhostClick (GC-203).
 //
-// Starts one check per journey / page monitor against the theme
+// Takes the theme to test as a preview link or a theme id (GC-208: the Action
+// never pushes a theme), starts one check per journey / page monitor against it
 // (POST /api/ci/theme-checks), waits for them (GET ...?ids=), writes the job
 // summary, optionally comments on the pull request, and exits 1 when a check
 // failed. Node 20+, no dependencies. The pure parts are exported for
@@ -23,6 +24,68 @@ export function pullRequestFrom(event) {
   const pr = event?.pull_request;
   if (!pr || typeof pr.number !== "number") return null;
   return { number: pr.number, sha: pr.head?.sha ?? null };
+}
+
+const THEME_PATH_RE = /\/themes\/(\d+)/;
+const MYSHOPIFY_RE = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/;
+
+/**
+ * The theme id (and the store, when the link names it) from what a developer
+ * has to hand: a storefront link with ?preview_theme_id=, a theme editor or
+ * admin theme link (/themes/123), or a bare id. Null when it holds none.
+ */
+export function themeFromLink(input) {
+  const raw = String(input ?? "").trim();
+  if (/^\d+$/.test(raw)) return { themeId: raw, store: null };
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  const host = url.hostname.toLowerCase();
+  const store = MYSHOPIFY_RE.test(host) ? host : null;
+  const param = url.searchParams.get("preview_theme_id");
+  if (param && /^\d+$/.test(param)) return { themeId: param, store };
+  const inPath = url.pathname.match(THEME_PATH_RE);
+  if (inPath) return { themeId: inPath[1], store };
+  return null;
+}
+
+/**
+ * Resolves the preview_url / theme_id inputs. A shared preview link
+ * (xxxx.shopifypreview.com) carries no id itself, so its redirects are
+ * followed until one names preview_theme_id.
+ */
+export async function resolveTheme({ previewUrl, themeId }, fetchImpl = fetch) {
+  if (themeId) {
+    const direct = themeFromLink(themeId);
+    return direct ? { ...direct, error: null } : { themeId: null, store: null, error: "theme_id must be a theme id number, like 123456789." };
+  }
+  if (!previewUrl) {
+    return { themeId: null, store: null, error: "Set preview_url to the theme's preview link (or theme_id to its id)." };
+  }
+  const found = themeFromLink(previewUrl);
+  if (found) return { ...found, error: null };
+  let next = previewUrl;
+  for (let hop = 0; hop < 5; hop++) {
+    let res;
+    try {
+      res = await fetchImpl(next, { redirect: "manual", headers: { "User-Agent": "ghostclick-theme-check-action" } });
+    } catch {
+      break;
+    }
+    const location = res.headers.get("location");
+    if (!location) break;
+    next = new URL(location, next).toString();
+    const hit = themeFromLink(next);
+    if (hit) return { ...hit, error: null };
+  }
+  return {
+    themeId: null,
+    store: null,
+    error: "Could not find a theme in preview_url. Use the theme's preview link (it has ?preview_theme_id= in it) or pass theme_id.",
+  };
 }
 
 const ICON = { passed: "✅", failed: "❌", error: "⚠️", queued: "⏳", running: "⏳" };
@@ -104,16 +167,18 @@ function fail(message, env = process.env) {
 
 export async function main(env = process.env) {
   const token = env.GHOSTCLICK_TOKEN?.trim();
-  const store = env.GHOSTCLICK_STORE?.trim();
-  const themeId = env.GHOSTCLICK_THEME_ID?.trim();
+  const storeInput = env.GHOSTCLICK_STORE?.trim() || null;
   const baseUrl = env.GHOSTCLICK_API_URL?.trim() || "https://www.getghostclick.com";
   const failOnFailure = parseBool(env.GHOSTCLICK_FAIL_ON_FAILURE, true);
   const minPageScore = Math.max(0, Math.min(100, Number(env.GHOSTCLICK_MIN_PAGE_SCORE) || 0));
   const timeoutMs = Math.max(1, Number(env.GHOSTCLICK_TIMEOUT_MINUTES) || 30) * 60_000;
 
   if (!token) return fail("Set ghostclick_token to your GhostClick GitHub key (a repository secret). Make one in GhostClick, Settings, GitHub Action.", env);
-  if (!store) return fail("Set store to your .myshopify.com address.", env);
-  if (!themeId) return fail("No theme to test: pass theme_id, or theme_access_password so the Action can push one.", env);
+  const resolved = await resolveTheme({ previewUrl: env.GHOSTCLICK_PREVIEW_URL?.trim(), themeId: env.GHOSTCLICK_THEME_ID?.trim() });
+  if (resolved.error) return fail(resolved.error, env);
+  const themeId = resolved.themeId;
+  // The key already fixes the store; a store named here is only checked against it.
+  const store = storeInput || resolved.store;
 
   let event = null;
   try {
@@ -126,7 +191,7 @@ export async function main(env = process.env) {
   const start = await api(baseUrl, token, "/api/ci/theme-checks", {
     method: "POST",
     body: JSON.stringify({
-      store,
+      ...(store ? { store } : {}),
       theme_id: themeId,
       commit: pr?.sha ?? env.GITHUB_SHA ?? null,
       ref: env.GITHUB_HEAD_REF || env.GITHUB_REF_NAME || null,

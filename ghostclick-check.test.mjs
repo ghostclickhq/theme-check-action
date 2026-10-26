@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { COMMENT_MARKER, buildSummary, main, parseBool, pullRequestFrom } from "./ghostclick-check.mjs";
+import { COMMENT_MARKER, buildSummary, main, parseBool, pullRequestFrom, resolveTheme, themeFromLink } from "./ghostclick-check.mjs";
 
 test("parseBool reads action inputs", () => {
   assert.equal(parseBool("false", true), false);
@@ -14,6 +14,34 @@ test("parseBool reads action inputs", () => {
 test("pullRequestFrom reads the pull_request event", () => {
   assert.deepEqual(pullRequestFrom({ pull_request: { number: 7, head: { sha: "abc" } } }), { number: 7, sha: "abc" });
   assert.equal(pullRequestFrom({ ref: "refs/heads/main" }), null);
+});
+
+test("themeFromLink reads preview links, admin links and bare ids", () => {
+  assert.deepEqual(themeFromLink("https://s.myshopify.com/?preview_theme_id=123"), { themeId: "123", store: "s.myshopify.com" });
+  assert.deepEqual(themeFromLink("https://shop.example.com/products/hat?preview_theme_id=9&_fd=0"), { themeId: "9", store: null });
+  assert.deepEqual(themeFromLink("https://admin.shopify.com/store/s/themes/456/editor"), { themeId: "456", store: null });
+  assert.deepEqual(themeFromLink(" 789 "), { themeId: "789", store: null });
+  assert.equal(themeFromLink("https://abc.shopifypreview.com"), null);
+  assert.equal(themeFromLink("not a link"), null);
+});
+
+test("resolveTheme follows a shared preview link to its theme", async () => {
+  const hops = [];
+  const fakeFetch = async (url) => {
+    hops.push(url);
+    const location = url === "https://abc.shopifypreview.com" ? "https://s.myshopify.com/?preview_theme_id=55&_ab=0" : null;
+    return new Response(null, { status: location ? 302 : 200, headers: location ? { location } : {} });
+  };
+  assert.deepEqual(await resolveTheme({ previewUrl: "https://abc.shopifypreview.com" }, fakeFetch), { themeId: "55", store: "s.myshopify.com", error: null });
+  assert.deepEqual(hops, ["https://abc.shopifypreview.com"]);
+});
+
+test("resolveTheme explains what is missing", async () => {
+  const noRedirect = async () => new Response("ok");
+  assert.match((await resolveTheme({}, noRedirect)).error, /preview_url/);
+  assert.match((await resolveTheme({ previewUrl: "https://example.com" }, noRedirect)).error, /Could not find a theme/);
+  assert.match((await resolveTheme({ themeId: "abc" }, noRedirect)).error, /theme id number/);
+  assert.equal((await resolveTheme({ themeId: "12", previewUrl: "https://x" }, noRedirect)).themeId, "12");
 });
 
 const verdict = {
@@ -66,8 +94,7 @@ test("main starts the checks, waits, writes the summary and fails the step", asy
   try {
     await main({
       GHOSTCLICK_TOKEN: "gc_ci_x",
-      GHOSTCLICK_STORE: "s",
-      GHOSTCLICK_THEME_ID: "42",
+      GHOSTCLICK_PREVIEW_URL: "https://s.myshopify.com/?preview_theme_id=42",
       GHOSTCLICK_MIN_PAGE_SCORE: "80",
       GHOSTCLICK_API_URL: "https://g/",
       GITHUB_EVENT_PATH: event,
@@ -82,7 +109,7 @@ test("main starts the checks, waits, writes the summary and fails the step", asy
   }
 
   assert.equal(requests[0].url, "https://g/api/ci/theme-checks");
-  assert.deepEqual(requests[0].body, { store: "s", theme_id: "42", commit: "headsha", ref: null, repository: "acme/theme", pull_request: 3 });
+  assert.deepEqual(requests[0].body, { store: "s.myshopify.com", theme_id: "42", commit: "headsha", ref: null, repository: "acme/theme", pull_request: 3 });
   assert.equal(requests[0].auth, "Bearer gc_ci_x");
   assert.equal(requests[1].url, "https://g/api/ci/theme-checks?ids=a1&min_page_score=80");
   // No github_token: no comment request.
